@@ -3,7 +3,8 @@ from html import unescape
 import itertools
 import logging
 import re
-from playwright.async_api import async_playwright
+from typing import Dict, List
+from playwright.async_api import async_playwright, Page
 from openpyxl import Workbook
 import pdb
 
@@ -13,9 +14,31 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.FileHandler("ebay_scraper.log"), logging.StreamHandler()],
 )
+TITLE_TABLES = [
+    "наименование товара",
+    "цена",
+    "категория",
+    "фото -1",
+    "фото -2",
+    "фото -3",
+    "фото -4",
+    "фото -5",
+    "фото -6",
+    "фото -7",
+    "фото -8",
+    "фото -9",
+    "фото -10",
+    "сылка на товар",
+    "сылка на продавца",
+    "колтчство товара",
+    "бренд ",
+    "кондиция товара",
+]
 
 
 async def split_list_by_delimiter(lst, delimiter):
+    """Split a list by separator."""
+    logging.info("Разделение списка по разделителю.")
     result = []
     current_sublist = []
     for item in lst:
@@ -31,88 +54,218 @@ async def split_list_by_delimiter(lst, delimiter):
     return result
 
 
-async def select_variant(page, variants):
-    for i, value in enumerate(variants):
-        try:
-            DROPDOWN_BUTTON_SELECTOR = "button.listbox-button__control"
+async def find_buttons(page, selector, level):
+    """Search for buttons by a given selector."""
+    logging.info(f"Поиск кнопок на уровне {level}.")
+    buttons = await page.query_selector_all(selector)
 
-            logging.info(f"Попытка выбрать вариант '{value}' на уровне {i + 1}.")
+    if not buttons:
+        logging.info(
+            f"Кнопки не найдены. Ожидание и повторный поиск на уровне {level}."
+        )
+        await asyncio.sleep(3)
+        buttons = await page.query_selector_all(selector)
 
-            buttons = await page.query_selector_all(DROPDOWN_BUTTON_SELECTOR)
-            logging.info(f"Найдено {len(buttons)} кнопок для выбора на уровне {i + 1}.")
+    if len(buttons) <= level:
+        raise ValueError(f"Кнопка раскрывающегося меню для уровня {level} не найдена.")
 
-            if len(buttons) <= i:
-                logging.info("Кнопки не найдены. Повторяю поиск после ожидания...")
-                await asyncio.sleep(3)
-                buttons = await page.query_selector_all(DROPDOWN_BUTTON_SELECTOR)
+    return buttons
 
-            if len(buttons) <= i:
-                raise ValueError(
-                    f"Кнопка раскрывающегося меню для уровня {i + 1} не найдена."
-                )
 
-            button = buttons[i]
-
-            # Получаем значение атрибута value кнопки
-            button_value = await button.get_attribute("value")
-
-            # Проверка: если значение кнопки уже совпадает с вариантом, пропускаем
-            if button_value and button_value.strip() == value.strip():
-                logging.info(
-                    f"Кнопка на уровне {i + 1} уже содержит выбранное значение '{value}'. Пропускаем клик."
-                )
-                continue
-
-            logging.info(f"Попытка нажать кнопку {i + 1}-го уровня.")
-            await button.click()
-            logging.info(
-                f"Кнопка раскрывающегося меню для уровня {i + 1} успешно нажата."
-            )
-
-            # Ждём появления выпадающего списка
-            await asyncio.sleep(1)  # Небольшая пауза для обновления DOM
-            await page.wait_for_selector(
-                f'div[role="listbox"]:has-text("{value}")',
-                state="visible",
-                timeout=60000,
-            )
-            logging.info(
-                f"Появился список для выбора. Попытка выбрать вариант '{value}'."
-            )
-
-            option = await page.query_selector(
-                f'div[role="option"]:has-text("{value}")'
-            )
-            if option is None:
-                raise ValueError(f"Опция '{value}' не найдена.")
-            await option.click()
-            logging.info(f"Вариант '{value}' на уровне {i + 1} успешно выбран.")
-        except Exception as e:
-            logging.error(
-                f"Ошибка при выборе варианта '{value}' на уровне {i + 1}: {str(e)}"
-            )
-            raise ValueError(
-                f"Ошибка при выборе варианта '{value}' (уровень {i + 1}): {str(e)}"
-            )
-
+async def select_option(page, button, value, level):
+    """Select an option from the drop-down list."""
     try:
-        logging.info("Попытка получить цену товара.")
+        logging.info(f"Получение значения кнопки на уровне {level}.")
+        button_value = await button.get_attribute("value")
+
+        if button_value and button_value.strip() == value.strip():
+            logging.info(
+                f"Кнопка на уровне {level} уже содержит выбранное значение '{value}'. Пропускаем."
+            )
+            return
+
+        logging.info(f"Нажимаем кнопку на уровне {level}.")
+        await button.click()
+
+        # We are waiting for the drop-down list to appear
+        await asyncio.sleep(1)
+        await page.wait_for_selector(
+            f'div[role="listbox"]:has-text("{value}")',
+            state="visible",
+            timeout=60000,
+        )
+
+        logging.info(f"Выбираем опцию '{value}' из выпадающего списка.")
+        option = await page.query_selector(f'div[role="option"]:has-text("{value}")')
+
+        if option is None:
+            logging.error(f"Опция '{value}' не найдена на уровне {level}.")
+            raise ValueError(f"Опция '{value}' не найдена на уровне {level}.")
+
+        await option.click()
+        logging.info(f"Опция '{value}' успешно выбрана на уровне {level}.")
+
+    except Exception as e:
+        logging.error(
+            f"Ошибка при выборе опции '{value}' на уровне {level}: {str(e)}",
+            exc_info=True,
+        )
+        raise
+
+
+async def get_price(page):
+    """Get the price of the product."""
+    try:
+        logging.info("Получение цены товара.")
         price_element = page.locator(
             'div[data-testid="x-price-primary"] span.ux-textspans'
         )
-        await price_element.wait_for(
-            state="visible", timeout=10000
-        )  # Ждем видимости цены
+        await price_element.wait_for(state="visible", timeout=10000)
         price_text = await price_element.inner_text()
         logging.info(f"Цена успешно получена: {price_text}")
-
-        # Удалить 'US $' и конвертировать в float
-
         return price_text
+    except Exception as e:
+        logging.error(f"Ошибка при получении цены: {str(e)}", exc_info=True)
+        raise ValueError(f"Ошибка при получении цены: {str(e)}")
+
+
+async def select_variant(page, variants):
+    """Select product variants."""
+    logging.info("Выбор вариантов товара.")
+    DROPDOWN_BUTTON_SELECTOR = "button.listbox-button__control"
+
+    for i, value in enumerate(variants):
+        try:
+            buttons = await find_buttons(page, DROPDOWN_BUTTON_SELECTOR, i)
+            button = buttons[i]
+            await select_option(page, button, value, i + 1)
+        except Exception as e:
+            logging.error(
+                f"Ошибка при обработке варианта '{value}' на уровне {i + 1}: {str(e)}",
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Ошибка при обработке варианта '{value}' (уровень {i + 1}): {str(e)}"
+            )
+
+    return await get_price(page)
+
+
+async def scroll_to_load(page: Page) -> None:
+    """Scroll the page to load all items."""
+    last_height = None
+    while True:
+        current_height = await page.evaluate("document.body.scrollHeight")
+        if last_height == current_height:
+            break
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(2)
+        last_height = current_height
+
+
+async def extract_text(element) -> str:
+    """Extract inner text from a Playwright element."""
+    return await element.inner_text() if element else "N/A"
+
+
+async def extract_image_urls(page: Page) -> List[str]:
+    """Extract up to 10 image URLs from a product page."""
+    images = await page.query_selector_all("button.ux-image-grid-item img")
+    image_urls = [await img.get_attribute("src") for img in images if img]
+    return image_urls[:10] + ["N/A"] * (10 - len(image_urls))
+
+
+async def get_listbox_values(page: Page):
+    values = []
+    # Find all elements with class 'listbox__value'
+    value_elements = await page.query_selector_all(".listbox__value")
+
+    # Extract text from each element
+    for element in value_elements:
+        value_text = await element.inner_text()
+        if value_text:  # Only add non-empty values
+            values.append(value_text.strip())
+
+    return values
+
+
+async def get_variant_values(item_page: Page):
+    """Get product variants."""
+    logging.info("Получение вариантов товара.")
+    try:
+        listbox_values = await item_page.query_selector_all(".listbox__value")
+        return [await element.inner_text() for element in listbox_values]
+    except Exception as e:
+        logging.error(f"Ошибка при извлечении значений вариантов: {e}", exc_info=True)
+        return []
+
+
+async def add_to_sheet(sheet: List[List[str]], product_data: Dict) -> None:
+    """Await docstring generation..."""
+    try:
+        sheet.append(
+            [
+                product_data["title"],
+                product_data["price"],
+                product_data["category"],
+            ]
+            + product_data.get("image_urls", [])
+            + [
+                product_data["item_url_href"],
+                product_data["seller_url"],
+                product_data.get("quantity", "N/A"),
+                product_data.get("brand", "N/A"),
+                product_data.get("condition", "N/A"),
+            ]
+        )
+    except KeyError as e:
+        logging.error(f"Отсутствует ключ в данных продукта: {e}", exc_info=True)
+    except Exception as e:
+        logging.error(f"Ошибка при добавлении данных в лист: {e}", exc_info=True)
+
+
+async def process_variants(item_page: Page, product_data: dict, sheet: list):
+    """Processes product variants and writes the results to Excel."""
+    logging.info("Обработка вариантов товара.")
+    try:
+        variant_values = await get_variant_values(item_page)
+        variant_values = await split_list_by_delimiter(variant_values, "Select")
+        if variant_values:
+            for combo in itertools.product(*variant_values):
+                variant_data = product_data.copy()
+                variant_data["title"] = f"{product_data['title']} : {combo}"
+                price_variant = await select_variant(item_page, combo)
+                if price_variant:
+                    variant_data["price"] = price_variant
+
+                await add_to_sheet(sheet, variant_data)
+                logging.info(f"Вариант {variant_data['title']} обработан.")
+        else:
+            await add_to_sheet(sheet, product_data)
 
     except Exception as e:
-        logging.error(f"Ошибка при получении цены: {str(e)}")
-        raise ValueError(f"Ошибка при получении цены: {str(e)}")
+        logging.error(f"Ошибка при обработке вариантов: {e}", exc_info=True)
+
+
+async def process_product_variants(
+    item_page: Page, product_data: dict, sheet: Workbook
+):
+    """
+    Processes product variants and writes results to Excel.
+
+
+    Args:
+        item_page (playwright.Page): Playwright page object for the product
+        product_data (dict): Dictionary containing product details (title, category, etc.)
+        sheet (Workbook): Openpyxl workbook object for writing data
+    """
+
+    try:
+        await process_variants(item_page, product_data, sheet)
+    except Exception as e:
+        logging.error(f"Ошибка при обработке вариантов продукта: {e}", exc_info=True)
+    finally:
+        await item_page.close()
 
 
 async def parse_ebay_seller(seller_url):
@@ -135,15 +288,7 @@ async def parse_ebay_seller(seller_url):
             logging.info(f"Navigated to {seller_url}")
 
             # Scroll the page to load all items (if applicable)
-            last_height = None
-            while True:
-                current_height = await page.evaluate("document.body.scrollHeight")
-                if last_height == current_height:
-                    break
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(2)  # Give time for content to load
-                last_height = current_height
-            logging.info("Page scrolling completed.")
+            await scroll_to_load(page)
 
             # Select product elements
             await page.wait_for_selector("ul.srp-results.srp-list")
@@ -155,41 +300,19 @@ async def parse_ebay_seller(seller_url):
             workbook = Workbook()
             sheet = workbook.active
             sheet.title = "eBay Seller Data"
-            sheet.append(
-                [
-                    "наименование товара",
-                    "цена",
-                    "категория",
-                    "фото -1",
-                    "фото -2",
-                    "фото -3",
-                    "фото -4",
-                    "фото -5",
-                    "фото -6",
-                    "фото -7",
-                    "фото -8",
-                    "фото -9",
-                    "фото -10",
-                    "сылка на товар",
-                    "сылка на продавца",
-                    "колтчство товара",
-                    "бренд ",
-                    "кондиция товара",
-                ]
-            )
+            sheet.append(TITLE_TABLES)
 
             # Extract data for each product
             for item in items:
                 try:
                     # Extract product details
-                    title = await item.query_selector(".s-item__title")
-                    title_text = await title.inner_text() if title else "N/A"
-
-                    price = await item.query_selector("span.s-item__price")
-                    price_text = await price.inner_text() if price else "N/A"
-
+                    title = await extract_text(
+                        await item.query_selector(".s-item__title")
+                    )
+                    price = await extract_text(
+                        await item.query_selector("span.s-item__price")
+                    )
                     # Extract product link
-
                     item_url = await item.query_selector("a.s-item__link")
                     item_url_href = (
                         await item_url.get_attribute("href") if item_url else "N/A"
@@ -202,133 +325,52 @@ async def parse_ebay_seller(seller_url):
                     item_page = await context.new_page()
                     await item_page.goto(item_url_href, wait_until="domcontentloaded")
 
-                    category_elem = await item_page.query_selector(
-                        "ul li a.seo-breadcrumb-text span"
-                    )
-                    category_name = (
-                        await category_elem.inner_text() if category_elem else "N/A"
+                    category = await extract_text(
+                        await item_page.query_selector(
+                            "ul li a.seo-breadcrumb-text span"
+                        )
                     )
 
                     # Extract available quantity text
 
-                    quantity_element = await item_page.query_selector(
-                        "#qtyAvailability .ux-textspans--SECONDARY"
-                    )
-                    quantity_text = (
-                        await quantity_element.inner_text()
-                        if quantity_element
-                        else "N/A"
+                    quantity = await extract_text(
+                        await item_page.query_selector(
+                            "#qtyAvailability .ux-textspans--SECONDARY"
+                        )
                     )
 
                     # Replace your existing condition element code with:
-                    condition_element = await item_page.query_selector(
-                        ".x-item-condition-text .ux-textspans"
-                    )
-                    condition_text = (
-                        await condition_element.inner_text()
-                        if condition_element
-                        else "N/A"
+                    condition = await extract_text(
+                        await item_page.query_selector(
+                            ".x-item-condition-text .ux-textspans"
+                        )
                     )
 
                     # Extract brand text
-                    brand_element = await item_page.query_selector(
-                        "dl[data-testid='ux-labels-values'].ux-labels-values--brand dd span.ux-textspans"
-                    )
-                    brand_text = (
-                        await brand_element.inner_text() if brand_element else "N/A"
+                    brand = await extract_text(
+                        await item_page.query_selector(
+                            "dl[data-testid='ux-labels-values'].ux-labels-values--brand dd span.ux-textspans"
+                        )
                     )
 
                     # Extract all images
-                    images = await item_page.query_selector_all(
-                        "button.ux-image-grid-item img"
-                    )
+                    image_urls = await extract_image_urls(item_page)
 
-                    image_urls = []
-                    for img in images:
-                        src = await img.get_attribute(
-                            "src"
-                        )  # Используем await для асинхронного вызова
-                        if src:
-                            image_urls.append(src)
-                    if len(image_urls) < 10:
-                        image_urls.extend(["N/A"] * (10 - len(image_urls)))
-
-                    # Add this where you're processing item details
-                    async def get_listbox_values(page):
-                        values = []
-                        # Find all elements with class 'listbox__value'
-                        value_elements = await page.query_selector_all(
-                            ".listbox__value"
-                        )
-
-                        # Extract text from each element
-                        for element in value_elements:
-                            value_text = await element.inner_text()
-                            if value_text:  # Only add non-empty values
-                                values.append(value_text.strip())
-
-                        return values
-
-                    # In your main item processing loop, add:
-                    try:
-                        # Your existing code...
-
-                        # Get all listbox values
-                        listbox_values = await get_listbox_values(item_page)
-                        logging.info(f"Found variants: {listbox_values}")
-
-                        listbox_values = await split_list_by_delimiter(
-                            listbox_values, "Select"
-                        )
-                        if listbox_values:
-
-                            for combo in itertools.product(*listbox_values):
-                                title_name = f"{title_text} : {combo}"
-                                logging.info(f"Processing combo : {combo}")
-
-                                price_variant = await select_variant(item_page, combo)
-                                if price_variant:
-                                    price_text = price_variant
-                                logging.info(f"Processing item: {title_name}")
-                                row = (
-                                    [title_name, price_text, category_name]
-                                    + image_urls[:10]
-                                    + [
-                                        item_url_href,
-                                        seller_url,
-                                        quantity_text,
-                                        brand_text,
-                                        condition_text,
-                                    ]
-                                )
-
-                                sheet.append(row)
-                                logging.info(f"Added item: {title_text}")
-
-                        else:
-                            row = (
-                                [title_text, price_text, category_name]
-                                + image_urls[:10]
-                                + [
-                                    item_url_href,
-                                    seller_url,
-                                    quantity_text,
-                                    brand_text,
-                                    condition_text,
-                                ]
-                            )
-
-                        sheet.append(row)
-                        logging.info(f"Added item: {title_text}")
-
-                    except Exception as e:
-                        logging.error(f"Error processing item variants: {e}")
-
-                    # Закрываем контекст
-                    await item_page.close()
+                    product_data = {
+                        "title": title,
+                        "price": price,
+                        "category": category,
+                        "image_urls": image_urls,
+                        "item_url_href": item_url_href,
+                        "seller_url": seller_url,
+                        "quantity": quantity,
+                        "brand": brand,
+                        "condition": condition,
+                    }
+                    await process_product_variants(item_page, product_data, sheet)
 
                 except Exception as e:
-                    logging.error(f"Error processing item: {e}")
+                    logging.error(f"Error processing item: {e}", exc_info=True)
 
             # Save the Excel file
             output_file = "ebay_seller_data_playwright.xlsx"
@@ -339,7 +381,7 @@ async def parse_ebay_seller(seller_url):
             await browser.close()
             logging.info("Browser closed.")
     except Exception as e:
-        logging.critical(f"An unexpected error occurred: {e}")
+        logging.critical(f"An unexpected error occurred: {e}", exc_info=True)
 
 
 # Specify the seller's URL
@@ -350,4 +392,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(parse_ebay_seller(seller_url))
     except Exception as e:
-        logging.critical(f"Failed to execute the script: {e}")
+        logging.critical(f"Failed to execute the script: {e}", exc_info=True)
