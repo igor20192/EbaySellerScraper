@@ -26,6 +26,12 @@ A robust, asynchronous web scraper designed to extract detailed product informat
 ```bash
 git https://github.com/igor20192/EbaySellerScraper.git
 cd EbaySellerScraper
+python -m venv venv
+source venv/bin/activate  # for Linux/MacOS
+venv\Scripts\activate     # for Windows
+
+pip install -r requirements.txt
+
 pip install playwright openpyxl asyncio
 playwright install chromium
 from scraper import parse_ebay_seller
