@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime
-from html import unescape
 import itertools
 import logging
 import re
@@ -8,7 +7,8 @@ from typing import Dict, List, Optional
 import playwright
 from playwright.async_api import async_playwright, Page, Browser, TimeoutError
 from openpyxl import Workbook
-import pdb
+from decouple import config
+
 
 # Configure logging
 logging.basicConfig(
@@ -567,7 +567,7 @@ async def process_pagination_page(browser: Browser, link: str, sheet):
 
 
 # Specify the seller's URL
-seller_url = "https://www.ebay.com/sch/i.html?_trksid=p3692&_ssn=satmaximum"
+seller_url = config("SELLER_URL")
 
 # Run the asynchronous function
 if __name__ == "__main__":
